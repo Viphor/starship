@@ -470,24 +470,36 @@ fn inject_separators<'a>(
 
         let next_bg = s.style_ref().background;
 
-        if let Some(pb) = prev_bg {
-            if next_bg != prev_bg {
-                let sep_style = if reverse_colors {
-                    // Right prompt: fg = next_bg (block to the right), bg = prev_bg (block to the left)
-                    let mut style = nu_ansi_term::Style::new().on(pb);
-                    if let Some(nb) = next_bg {
-                        style = style.fg(nb);
-                    }
-                    style
-                } else {
-                    // Left prompt: fg = prev_bg (block to the left), bg = next_bg (block to the right)
-                    match next_bg {
-                        Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
-                        None => nu_ansi_term::Style::new().fg(pb),
-                    }
-                };
-                result.push(sep_style.paint(symbol.to_owned()));
-            }
+        // Left prompt:  separator fires when leaving a coloured block (prev_bg is Some).
+        //   → separator sits at the END of the coloured block, before the next block.
+        // Right prompt: separator fires when entering a coloured block (next_bg is Some).
+        //   → separator sits at the BEGINNING of the coloured block, after whatever came before.
+        let should_insert = if reverse_colors {
+            next_bg.is_some() && next_bg != prev_bg
+        } else {
+            prev_bg.is_some() && next_bg != prev_bg
+        };
+
+        if should_insert {
+            let sep_style = if reverse_colors {
+                // Right prompt: fg = next_bg (entering), bg = prev_bg (leaving, None = clear)
+                let mut style = nu_ansi_term::Style::new();
+                if let Some(nb) = next_bg {
+                    style = style.fg(nb);
+                }
+                if let Some(pb) = prev_bg {
+                    style = style.on(pb);
+                }
+                style
+            } else {
+                // Left prompt: fg = prev_bg (leaving), bg = next_bg (entering, None = clear)
+                let pb = prev_bg.unwrap(); // safe: prev_bg.is_some() is the trigger condition
+                match next_bg {
+                    Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
+                    None => nu_ansi_term::Style::new().fg(pb),
+                }
+            };
+            result.push(sep_style.paint(symbol.to_owned()));
         }
 
         prev_bg = next_bg;
@@ -1033,22 +1045,66 @@ mod test {
 
     #[test]
     fn separator_right_prompt_reverses_fg_bg() {
-        // For right prompts the separator fg/bg are swapped:
-        // fg = next_bg (block to the right), bg = prev_bg (block to the left).
+        // For right prompts a separator fires before each coloured block.
+        // When two coloured blocks follow each other: sep(entering=bg2, leaving=bg1)
+        // appears between them, and sep(entering=bg1, leaving=none) appears before the first.
         let strings = vec![
             nu_ansi_term::Color::White
                 .on(nu_ansi_term::Color::Blue)
-                .paint("foo"),
+                .paint("foo"), // bg:blue
             nu_ansi_term::Color::Black
                 .on(nu_ansi_term::Color::Green)
-                .paint("bar"),
+                .paint("bar"), // bg:green
         ];
         let result = inject_separators(strings, "◀", true);
+        // [sep(fg=blue bg=none), foo, sep(fg=green bg=blue), bar]
+        assert_eq!(result.len(), 4);
+        // Separator before foo: entering Blue from clear
+        let sep1 = &result[0];
+        assert_eq!(sep1.as_str(), "◀");
+        assert_eq!(sep1.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
+        assert_eq!(sep1.style_ref().background, None);
+        // Separator before bar: entering Green from Blue
+        let sep2 = &result[2];
+        assert_eq!(sep2.as_str(), "◀");
+        assert_eq!(sep2.style_ref().foreground, Some(nu_ansi_term::Color::Green));
+        assert_eq!(sep2.style_ref().background, Some(nu_ansi_term::Color::Blue));
+    }
+
+    #[test]
+    fn separator_right_prompt_inserts_before_first_colored_block() {
+        // Right prompt: separator fires when ENTERING a coloured block, so a separator
+        // appears even before the very first module that has a background.
+        let strings = vec![
+            nu_ansi_term::Style::new().paint("foo"), // no bg
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("bar"), // bg:blue
+        ];
+        let result = inject_separators(strings, "◀", true);
+        // Expect: foo, separator, bar
         assert_eq!(result.len(), 3);
         let sep = &result[1];
         assert_eq!(sep.as_str(), "◀");
-        // Reversed: fg = Green (next bg), bg = Blue (prev bg)
-        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Green));
-        assert_eq!(sep.style_ref().background, Some(nu_ansi_term::Color::Blue));
+        // fg = Blue (entering), bg = None (no previous block)
+        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
+        assert_eq!(sep.style_ref().background, None);
+    }
+
+    #[test]
+    fn separator_right_prompt_no_separator_after_last_colored_block() {
+        // Right prompt: when a coloured block is followed by a no-bg segment, no separator
+        // fires after the block. (There is one before the block, but not after.)
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"), // bg:blue
+            nu_ansi_term::Style::new().paint("bar"), // no bg
+        ];
+        let result = inject_separators(strings, "◀", true);
+        // [sep(fg=blue, bg=none), foo, bar] — separator before block, none after
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].as_str(), "◀"); // separator before foo
+        assert_eq!(result[2].as_str(), "bar"); // bar directly after, no extra separator
     }
 }
