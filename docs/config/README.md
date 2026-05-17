@@ -4387,6 +4387,40 @@ By default the module will be shown if any of the following conditions are met:
 symbol = '🌟 '
 ```
 
+## Separator
+
+The `separator` module injects a powerline-style connector string between adjacent prompt
+segments. The separator's foreground color matches the background of the previous segment,
+and its background color matches the background of the next segment. When the next segment
+has no background color, the separator's background is cleared (terminal default).
+
+This module is disabled by default to avoid affecting existing configurations.
+
+### Options
+
+| Option         | Default | Description                                              |
+| -------------- | ------- | -------------------------------------------------------- |
+| `left_symbol`  | `''`  | The string injected between segments on the left prompt. |
+| `right_symbol` | `''`  | The string injected between segments on the right prompt.|
+| `disabled`     | `true`  | Disables the separator.                                  |
+
+### Example
+
+```toml
+# ~/.config/starship.toml
+
+[separator]
+disabled = false
+left_symbol = ''
+right_symbol = ''
+```
+
+This produces a powerline look where each segment flows into the next:
+
+```
+ directory   git_branch 
+```
+
 ## Shell
 
 The `shell` module shows an indicator for currently used shell.

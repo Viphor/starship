@@ -1,5 +1,5 @@
 use clap::{ValueEnum, builder::PossibleValue};
-use nu_ansi_term::AnsiStrings;
+use nu_ansi_term::{AnsiString, AnsiStrings};
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::BTreeSet;
@@ -12,6 +12,8 @@ use terminal_size::terminal_size;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
+use crate::config::ModuleConfig;
+use crate::configs::separator::SeparatorConfig;
 use crate::configs::PROMPT_ORDER;
 use crate::context::{Context, Properties, Shell, Target};
 use crate::formatter::{StringFormatter, VariableHolder};
@@ -143,6 +145,17 @@ pub fn get_prompt(context: &Context) -> String {
     );
 
     let module_strings = root_module.ansi_strings_for_width(Some(context.width));
+    let sep_config = SeparatorConfig::try_load(context.config.get_module_config("separator"));
+    let module_strings = if sep_config.disabled {
+        module_strings
+    } else {
+        let symbol = if context.target == Target::Right {
+            sep_config.right_symbol
+        } else {
+            sep_config.left_symbol
+        };
+        inject_separators(module_strings, symbol)
+    };
     if config.add_newline && context.target != Target::Continuation {
         // continuation prompts normally do not include newlines, but they can
         writeln!(buf).unwrap();
@@ -424,6 +437,50 @@ pub fn format_duration(duration: &Duration) -> String {
         format!("{:?}ms", &milis)
     }
 }
+
+/// Injects powerline-style separator glyphs between adjacent segments that have background colors.
+///
+/// For each non-empty, non-newline segment where the previous non-empty segment had a background
+/// color, a separator `AnsiString` is inserted with:
+/// - foreground = previous segment's background color
+/// - background = current segment's background color (or cleared if none)
+///
+/// Tracking resets on newline segments so separators are never injected across line boundaries.
+fn inject_separators<'a>(strings: Vec<AnsiString<'a>>, symbol: &str) -> Vec<AnsiString<'a>> {
+    let mut result = Vec::with_capacity(strings.len());
+    let mut prev_bg: Option<nu_ansi_term::Color> = None;
+
+    for s in strings {
+        let value = s.as_str();
+
+        if value == "\n" {
+            prev_bg = None;
+            result.push(s);
+            continue;
+        }
+
+        if value.is_empty() {
+            result.push(s);
+            continue;
+        }
+
+        let next_bg = s.style_ref().background;
+
+        if let Some(pb) = prev_bg {
+            let sep_style = match next_bg {
+                Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
+                None => nu_ansi_term::Style::new().fg(pb),
+            };
+            result.push(sep_style.paint(symbol.to_owned()));
+        }
+
+        prev_bg = next_bg;
+        result.push(s);
+    }
+
+    result
+}
+
 
 /// Return the modules from $all that are not already in the list
 fn all_modules_uniq(module_list: &BTreeSet<String>) -> Vec<String> {
@@ -843,5 +900,102 @@ mod test {
         let expected = "user profile";
         let actual = get_prompt(&context);
         assert_eq!(expected, actual);
+    }
+
+    // ── inject_separators unit tests ────────────────────────────────────────
+
+    #[test]
+    fn separator_no_injection_without_prev_bg() {
+        // Neither segment has a background — no separator should appear.
+        let strings = vec![
+            nu_ansi_term::Style::new()
+                .fg(nu_ansi_term::Color::Red)
+                .paint("foo"),
+            nu_ansi_term::Style::new()
+                .fg(nu_ansi_term::Color::Blue)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn separator_injected_between_two_bg_segments() {
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            nu_ansi_term::Color::Black
+                .on(nu_ansi_term::Color::Green)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        // Expect: foo, separator, bar
+        assert_eq!(result.len(), 3);
+        let sep = &result[1];
+        assert_eq!(sep.as_str(), "▶");
+        // Separator fg = Blue (prev bg), bg = Green (next bg)
+        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
+        assert_eq!(
+            sep.style_ref().background,
+            Some(nu_ansi_term::Color::Green)
+        );
+    }
+
+    #[test]
+    fn separator_bg_cleared_when_next_has_no_bg() {
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            nu_ansi_term::Style::new()
+                .fg(nu_ansi_term::Color::White)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        assert_eq!(result.len(), 3);
+        let sep = &result[1];
+        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
+        assert_eq!(sep.style_ref().background, None); // cleared
+    }
+
+    #[test]
+    fn separator_tracking_resets_on_newline() {
+        // After a newline, prev_bg is cleared — no separator should appear before the next segment.
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            AnsiString::from("\n"),
+            nu_ansi_term::Color::Black
+                .on(nu_ansi_term::Color::Green)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        assert_eq!(result.len(), 3); // no separator added
+    }
+
+    #[test]
+    fn separator_skips_empty_strings_without_resetting_prev_bg() {
+        // An empty AnsiString in the middle should not break the separator injection.
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            nu_ansi_term::Style::new().paint(""),
+            nu_ansi_term::Color::Black
+                .on(nu_ansi_term::Color::Green)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        // Expect: foo, empty, separator, bar
+        assert_eq!(result.len(), 4);
+        let sep = &result[2];
+        assert_eq!(sep.as_str(), "▶");
+        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
+        assert_eq!(
+            sep.style_ref().background,
+            Some(nu_ansi_term::Color::Green)
+        );
     }
 }
