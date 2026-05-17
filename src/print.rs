@@ -154,7 +154,7 @@ pub fn get_prompt(context: &Context) -> String {
         } else {
             sep_config.left_symbol
         };
-        inject_separators(module_strings, symbol)
+        inject_separators(module_strings, symbol, context.target == Target::Right)
     };
     if config.add_newline && context.target != Target::Continuation {
         // continuation prompts normally do not include newlines, but they can
@@ -446,7 +446,11 @@ pub fn format_duration(duration: &Duration) -> String {
 /// - background = current segment's background color (or cleared if none)
 ///
 /// Tracking resets on newline segments so separators are never injected across line boundaries.
-fn inject_separators<'a>(strings: Vec<AnsiString<'a>>, symbol: &str) -> Vec<AnsiString<'a>> {
+fn inject_separators<'a>(
+    strings: Vec<AnsiString<'a>>,
+    symbol: &str,
+    reverse_colors: bool,
+) -> Vec<AnsiString<'a>> {
     let mut result = Vec::with_capacity(strings.len());
     let mut prev_bg: Option<nu_ansi_term::Color> = None;
 
@@ -468,9 +472,19 @@ fn inject_separators<'a>(strings: Vec<AnsiString<'a>>, symbol: &str) -> Vec<Ansi
 
         if let Some(pb) = prev_bg {
             if next_bg != prev_bg {
-                let sep_style = match next_bg {
-                    Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
-                    None => nu_ansi_term::Style::new().fg(pb),
+                let sep_style = if reverse_colors {
+                    // Right prompt: fg = next_bg (block to the right), bg = prev_bg (block to the left)
+                    let mut style = nu_ansi_term::Style::new().on(pb);
+                    if let Some(nb) = next_bg {
+                        style = style.fg(nb);
+                    }
+                    style
+                } else {
+                    // Left prompt: fg = prev_bg (block to the left), bg = next_bg (block to the right)
+                    match next_bg {
+                        Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
+                        None => nu_ansi_term::Style::new().fg(pb),
+                    }
                 };
                 result.push(sep_style.paint(symbol.to_owned()));
             }
@@ -917,7 +931,7 @@ mod test {
                 .fg(nu_ansi_term::Color::Blue)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         assert_eq!(result.len(), 2);
     }
 
@@ -931,7 +945,7 @@ mod test {
                 .on(nu_ansi_term::Color::Green)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         // Expect: foo, separator, bar
         assert_eq!(result.len(), 3);
         let sep = &result[1];
@@ -954,7 +968,7 @@ mod test {
                 .fg(nu_ansi_term::Color::White)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         assert_eq!(result.len(), 3);
         let sep = &result[1];
         assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Blue));
@@ -973,7 +987,7 @@ mod test {
                 .on(nu_ansi_term::Color::Green)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         assert_eq!(result.len(), 3); // no separator added
     }
 
@@ -989,7 +1003,7 @@ mod test {
                 .on(nu_ansi_term::Color::Green)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         // Expect: foo, empty, separator, bar
         assert_eq!(result.len(), 4);
         let sep = &result[2];
@@ -1013,7 +1027,28 @@ mod test {
                 .on(nu_ansi_term::Color::Blue)
                 .paint("bar"),
         ];
-        let result = inject_separators(strings, "▶");
+        let result = inject_separators(strings, "▶", false);
         assert_eq!(result.len(), 2); // no separator
+    }
+
+    #[test]
+    fn separator_right_prompt_reverses_fg_bg() {
+        // For right prompts the separator fg/bg are swapped:
+        // fg = next_bg (block to the right), bg = prev_bg (block to the left).
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            nu_ansi_term::Color::Black
+                .on(nu_ansi_term::Color::Green)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "◀", true);
+        assert_eq!(result.len(), 3);
+        let sep = &result[1];
+        assert_eq!(sep.as_str(), "◀");
+        // Reversed: fg = Green (next bg), bg = Blue (prev bg)
+        assert_eq!(sep.style_ref().foreground, Some(nu_ansi_term::Color::Green));
+        assert_eq!(sep.style_ref().background, Some(nu_ansi_term::Color::Blue));
     }
 }
