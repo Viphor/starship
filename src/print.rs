@@ -467,11 +467,13 @@ fn inject_separators<'a>(strings: Vec<AnsiString<'a>>, symbol: &str) -> Vec<Ansi
         let next_bg = s.style_ref().background;
 
         if let Some(pb) = prev_bg {
-            let sep_style = match next_bg {
-                Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
-                None => nu_ansi_term::Style::new().fg(pb),
-            };
-            result.push(sep_style.paint(symbol.to_owned()));
+            if next_bg != prev_bg {
+                let sep_style = match next_bg {
+                    Some(nb) => nu_ansi_term::Style::new().fg(pb).on(nb),
+                    None => nu_ansi_term::Style::new().fg(pb),
+                };
+                result.push(sep_style.paint(symbol.to_owned()));
+            }
         }
 
         prev_bg = next_bg;
@@ -997,5 +999,21 @@ mod test {
             sep.style_ref().background,
             Some(nu_ansi_term::Color::Green)
         );
+    }
+
+    #[test]
+    fn separator_not_injected_between_same_bg_segments() {
+        // Two segments with identical backgrounds are part of the same visual block —
+        // no separator should appear between them.
+        let strings = vec![
+            nu_ansi_term::Color::White
+                .on(nu_ansi_term::Color::Blue)
+                .paint("foo"),
+            nu_ansi_term::Color::Black
+                .on(nu_ansi_term::Color::Blue)
+                .paint("bar"),
+        ];
+        let result = inject_separators(strings, "▶");
+        assert_eq!(result.len(), 2); // no separator
     }
 }
