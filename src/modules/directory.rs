@@ -74,15 +74,6 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     #[cfg(windows)]
     let dir_string = remove_extended_path_prefix(dir_string);
 
-    // Apply path substitutions
-    let dir_string = match substitute_path(dir_string.clone(), &config.substitutions) {
-        Ok(result) => result,
-        Err(err) => {
-            log::warn!("Invalid regex in directory substitutions: {err}");
-            dir_string
-        }
-    };
-
     // Truncate the dir string to the maximum number of path components
     let dir_string =
         if let Some(truncated) = truncate(&dir_string, config.truncation_length as usize) {
@@ -135,6 +126,18 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     } else {
         path_vec
     };
+
+    // Apply path substitutions
+    let path_vec =
+        path_vec.map(
+            |path| match substitute_path(path.clone(), &config.substitutions) {
+                Ok(result) => result,
+                Err(err) => {
+                    log::warn!("Invalid regex in directory substitutions: {err}");
+                    path
+                }
+            },
+        );
 
     let display_format = if path_vec[0].is_empty() && path_vec[1].is_empty() {
         config.format
